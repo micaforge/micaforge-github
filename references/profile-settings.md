@@ -50,7 +50,6 @@ cd ~/workspace/micaforge-ai-profile && git push
 
 ## Future: avatar variations
 
-Ideas parked by Curtis 2026-10-15: generate the familiar doing different
-things, add backgrounds/scenes via the avatar media-generation tool
-(`/opt/hatch/bin/avatar-media-generation`) or a free image API. The prep
-script above handles whatever comes out.
+Ideas parked: generate the familiar doing different things, add
+backgrounds/scenes via an image generation API. The prep script above
+handles whatever comes out.

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="micaforge-github logo" width="120"/>
+<img src="assets/icon.png" alt="micaforge-github logo" width="120"/>
 
 # micaforge-github
 
@@ -32,7 +32,6 @@ Read `SKILL.md` — it routes to everything else.
 | Script | What it does |
 |--------|--------------|
 | `bin/gh-avatar-prep` | Prep any image → GitHub-ready avatar PNG (460px, <1MB) |
-| `bin/gh-auth` | Auth `gh` CLI as micaforge-ai (vault-backed) — TODO |
 
 ## 🗂️ Repository structure
 
@@ -41,7 +40,6 @@ micaforge-github/
 ├── SKILL.md          # entry point: identity, workflows, gates
 ├── bin/              # gh-avatar-prep
 ├── references/       # profile-settings.md — avatar, bio, README workflows
-├── workflows/        # step-by-step procedures (TODO)
 ├── assets/           # logo
 └── README.md
 ```

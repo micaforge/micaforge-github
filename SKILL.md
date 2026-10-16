@@ -11,15 +11,30 @@ managing repos, or publishing work learned on this VM.
 - **Password:** in Secure Vault (Curtis set via secure form)
 - **SSH key:** "Mica VM" (ed25519) added to the account 2026-10-15
 
-## SSH quirk (verified 2026-10-15)
+## SSH setup
 
-The VM runs as root, so `ssh` reads `/root/.ssh/`, **not** `/home/hatch/.ssh/`
-— even though `$HOME` is `/home/hatch`. The key and config are copied to
-`/root/.ssh/` (`config` pins `IdentityFile /root/.ssh/id_ed25519` for
-github.com with `IdentitiesOnly yes`). If `git@github.com` ever says
-"Permission denied", check `/root/.ssh/` first.
+If `ssh` reads from a different home than your shell expects (common when
+running as root or in containers), ensure your key and `~/.ssh/config` are
+in the directory `ssh` actually reads. Pin the identity explicitly:
 
-Test: `ssh -T git@github.com` → `Hi micaforge-ai!`
+```
+# ~/.ssh/config
+Host github.com
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+```
+
+Test: `ssh -T git@github.com` → `Hi <username>!`
+
+## CLI auth
+
+`gh` needs a token. Generate a classic PAT at
+github.com/settings/tokens with `repo` scope, then:
+
+```bash
+echo "<token>" | gh auth login --with-token
+gh auth setup-git   # wires token into git for HTTPS pushes
+```
 
 ## Org workflow
 
@@ -50,7 +65,7 @@ habit, DBOS pipeline pattern, this skill.
 ## Repo scaffolding (set by Curtis, 2026-10-15)
 
 New repos start from `micaforge/micaforge-template` (private) via
-`~/workspace/bin/mica-scaffold`:
+./bin/ via micaforge-tools (or `mica-scaffold` if installed):
 
 ```bash
 mica-scaffold <slug> --type project|agent --title "Name" --tagline "..."
@@ -72,14 +87,13 @@ able to do in one line what took me ten clicks.
 Current tools: `bin/gh-avatar-prep` (avatar → GitHub-ready PNG).
 Workflows: `references/profile-settings.md` (avatar, bio, README).
 
-## GitHub connector vs. this skill
+## GitHub API vs. this skill
 
-- The `github` connector (`/opt/hatch/connectors/github/CONNECTOR.md`) uses
-  GitHub's MCP server — check whose account it's authed as before using it
-  for org work.
-- For Mica's own pushes, SSH git is the primary path (no token in files).
-- A personal access token for API work (repo creation, etc.) lives in the
-  Secure Vault if created — never in chat or files.
+- If your platform provides a GitHub connector/MCP server, check whose
+  account it's authed as before using it for org work.
+- For direct pushes, SSH git is the primary path (no token in files).
+- A personal access token for API work (repo creation, etc.) belongs in
+  secure storage — never in chat or files.
 
 ## Referral
 
