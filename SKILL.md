@@ -51,6 +51,36 @@ Nothing goes public unless all four hold:
 3. Zero secrets, private data, or personal paths
 4. Documented for outside users (README that stands alone)
 
+## Visual verification (PR quality track)
+
+UI changes ship with screenshot evidence, produced by `tools/shot-diff`
+(one command — a script, not an agent):
+
+```bash
+tools/shot-diff --repo <dir> --base <ref> --head <ref> --route <path> \
+    --build-cmd "<cmd>" --build-dir <dir> --dist <dir>
+```
+
+Builds both refs (git worktrees; prebuilt dirs via `--base-dir`/`--head-dir`
+skip the build), serves each locally, captures **390px + 1440px**
+viewports with lightpanda over CDP (a private instance per run — this
+Meta Chromium build LNA-blocks all loopback navigations, so Chromium
+can't shoot localhost here), pixel-diffs with PIL, and writes
+`base/head/diff-{390px,1440px}.png` plus one verdict line per viewport
+(`IDENTICAL` or `DIFF <n>% pixels`). Exit 0 on a completed run — diffs
+are information, the human judges intent. Attach the six images to the
+PR's verification bundle.
+
+**Fidelity caveat (verified 2026-10-19):** lightpanda renders DOM
+structure, text, and JS faithfully and deterministically — but it does
+**not** apply author CSS (external, inline `<style>`, or style
+attributes all render unstyled). So shot-diff catches content,
+structure, and reflow regressions, not color/styling regressions. This
+Meta Chromium build can't shoot localhost at all (LNA-blocks every
+loopback navigation), which is why lightpanda is the engine. If a
+Chromium-based engine becomes viable here, it's one function to swap
+(`shot()` in the script).
+
 ## The "everything we learn ships" rule (set by Curtis 2026-10-15)
 
 Anything we build or fix on this VM that works and improves the setup is
