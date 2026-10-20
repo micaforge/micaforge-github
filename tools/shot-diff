@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# tools/shot-diff — one-command visual diff for UI changes.
+#
+#   tools/shot-diff --repo <dir> --base <ref> --head <ref> --route <path> [opts]
+#
+# Builds the client at two git refs (or takes prebuilt dirs), serves each,
+# captures 390px + 1440px viewports with headless Chromium, pixel-diffs
+# base vs head, and writes attachable evidence:
+#   base-390.png head-390.png diff-390.png (+ 1440px variants)
+# Prints one verdict line per viewport; exit 0 on a completed run
+# (diffs are information, not failure — the human judges intent).
+#
+# Screenshot engine: lightpanda via CDP (self-contained instance per
+# run). This Meta Chromium build LNA-blocks every loopback navigation
+# (ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS) — via CDP and CLI alike —
+# so Chromium can't shoot localhost here; lightpanda has no such block.
+# Pixel diff: PIL (stdlib-adjacent, already on the VM) — no new heavy deps.
+set -uo pipefail
+
+REPO="."; BASE=""; HEAD="HEAD"; ROUTE="/"; OUT="./shot-diff-out"
+BUILD_CMD=""; BUILD_DIR="."; DIST="dist"; BASE_DIR=""; HEAD_DIR=""
+
+usage() {
+  sed -n '2,/^set -uo/p' "$0" | sed 's/^# \{0,1\}//'
+  cat <<'EOF'
+
+Options:
+  --repo DIR        repo to diff (default: .)
+  --base REF        base git ref (required unless --base-dir/--head-dir)
+  --head REF        head git ref (default: HEAD)
+  --route PATH      app route to capture (default: /)
+  --out DIR         output dir (default: ./shot-diff-out)
+  --build-cmd CMD   build command, run in <worktree>/<build-dir>
+                    (e.g. "bun run build:client"); omit with prebuilt dirs
+  --build-dir DIR   subdir to run the build in (default: .)
+  --dist DIR        build output dir, relative to build-dir (default: dist)
+  --base-dir DIR    prebuilt static dir for base (skips git+build)
+  --head-dir DIR    prebuilt static dir for head (skips git+build)
+  --help            this text
+
+Examples:
+  # prism-window, dev vs a UI tweak branch:
+  tools/shot-diff --repo ~/workspace/projects/micaforge/repos/prism-window \
+      --base dev --head scratch/new-hero --route / \
+      --build-cmd "bun run build:client" --build-dir app --dist client/dist
+  # prebuilt dirs (no git, no build):
+  tools/shot-diff --base-dir ./dist-base --head-dir ./dist-head --route /
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO="$2"; shift 2;; --base) BASE="$2"; shift 2;;
+    --head) HEAD="$2"; shift 2;; --route) ROUTE="$2"; shift 2;;
+    --out) OUT="$2"; shift 2;; --build-cmd) BUILD_CMD="$2"; shift 2;;
+    --build-dir) BUILD_DIR="$2"; shift 2;; --dist) DIST="$2"; shift 2;;
+    --base-dir) BASE_DIR="$2"; shift 2;; --head-dir) HEAD_DIR="$2"; shift 2;;
+    --help|-h) usage; exit 0;;
+    *) echo "unknown arg: $1" >&2; usage >&2; exit 2;;
+  esac
+done
+
+PREBUILT=0
+if [[ -n "$BASE_DIR" || -n "$HEAD_DIR" ]]; then
+  [[ -n "$BASE_DIR" && -n "$HEAD_DIR" ]] || { echo "need both --base-dir and --head-dir" >&2; exit 2; }
+  PREBUILT=1
+else
+  [[ -n "$BASE" ]] || { echo "--base required (or use --base-dir/--head-dir)" >&2; exit 2; }
+fi
+
+REPO="$(cd "$REPO" && pwd)"
+OUT="$(mkdir -p "$OUT" && cd "$OUT" && pwd)"
+TMP="$(mktemp -d)"
+cleanup() { rm -rf "$TMP"; kill $SERVERS 2>/dev/null; }
+SERVERS=""
+trap cleanup EXIT
+
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
+
+# Resolve a serve dir per side: prebuilt dir, or worktree + build.
+# NOTE: worktree add --detach prints to stderr; keep it simple and robust:
+serve_dir() { # $1 = side, $2 = ref, $3 = prebuilt dir
+  local side="$1" ref="$2" pre="$3"
+  if [[ $PREBUILT -eq 1 ]]; then
+    [[ -d "$pre" ]] || { echo "missing dir: $pre" >&2; exit 2; }
+    echo "$pre"; return
+  fi
+  local wt="$TMP/wt-$side"
+  git -C "$REPO" worktree add --detach --quiet "$wt" "$ref" || { echo "[$side] worktree failed for $ref" >&2; exit 1; }
+  # Fresh worktrees lack node_modules (gitignored). Same-machine shortcut:
+  # reuse the repo's installed modules instead of a full reinstall.
+  if [[ ! -e "$wt/$BUILD_DIR/node_modules" && -e "$REPO/$BUILD_DIR/node_modules" ]]; then
+    ln -s "$REPO/$BUILD_DIR/node_modules" "$wt/$BUILD_DIR/node_modules"
+    echo "[$side] linked node_modules from repo checkout" >&2
+  fi
+  # remove the worktree registration on exit but keep files until cleanup
+  if [[ -n "$BUILD_CMD" ]]; then
+    echo "[$side] building $ref ..." >&2
+    ( cd "$wt/$BUILD_DIR" && timeout 300 bash -c "$BUILD_CMD" ) >&2 || { echo "[$side] build failed" >&2; exit 1; }
+  fi
+  local dist="$wt/$BUILD_DIR/$DIST"
+  [[ -d "$dist" ]] || { echo "[$side] no dist dir: $dist" >&2; exit 1; }
+  echo "$dist"
+}
+
+BASE_SERVE="$(serve_dir base "$BASE" "$BASE_DIR")" || exit 1
+HEAD_SERVE="$(serve_dir head "$HEAD" "$HEAD_DIR")" || exit 1
+
+serve() { # $1 = dir -> prints port
+  local port; port="$(free_port)"
+  ( python3 -m http.server "$port" --directory "$1" >/dev/null 2>&1 & echo $! >> "$TMP/pids" )
+  for _ in $(seq 1 40); do
+    curl -sf -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && { echo "$port"; return; }
+    sleep 0.25
+  done
+  echo "serve failed for $1" >&2; exit 1
+}
+
+P_BASE="$(serve "$BASE_SERVE")" || exit 1
+P_HEAD="$(serve "$HEAD_SERVE")" || exit 1
+SERVERS="$(tr '\n' ' ' < "$TMP/pids")"
+
+# Screenshot engine: CDP against a running Chromium (persistent browser on
+# 9222 if up, else our own headless instance on a free port). The chrome
+# CLI --screenshot path is broken in this environment; CDP
+# Page.captureScreenshot works.
+LP_PORT=""
+ensure_engine() {
+  # Self-contained: our own lightpanda instance (CDP-speaking). Not the
+  # persistent Chromium — this Meta Chromium build LNA-blocks all
+  # loopback navigations (ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS),
+  # via CDP and CLI alike; lightpanda has no such block.
+  LP_PORT="$(free_port)"
+  "${LIGHTPANDA:-$HOME/workspace/bin/lightpanda}" serve \
+    --host 127.0.0.1 --port "$LP_PORT" >/tmp/shot-diff-lp.log 2>&1 &
+  echo $! >> "$TMP/pids"
+  for _ in $(seq 1 40); do
+    curl -sf -m 2 "http://127.0.0.1:$LP_PORT/json/version" >/dev/null 2>&1 && \
+      { echo "[shot] lightpanda CDP on $LP_PORT" >&2; return; }
+    sleep 0.25
+  done
+  echo "could not start lightpanda for screenshots" >&2; exit 1
+}
+
+shot() { # $1 = serve port, $2 = out.png, $3 = W, $4 = H, $5 = url path
+  python3 - "$LP_PORT" "http://127.0.0.1:$1$5" "$2" "$3" "$4" <<'PYEOF'
+import sys, base64, json, http.client, socket, struct, os, time
+port, url, out, W, H = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+
+# browser-level websocket (lightpanda exposes one WS at /)
+key = base64.b64encode(os.urandom(16)).decode()
+s = socket.create_connection(("127.0.0.1", int(port)), timeout=30)
+s.sendall(f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
+          f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+resp = b""
+while b"\r\n\r\n" not in resp:
+    resp += s.recv(4096)
+
+def send(mid, method, params=None, session=None):
+    m = {"id": mid, "method": method, "params": params or {}}
+    if session:
+        m["sessionId"] = session
+    data = json.dumps(m).encode()
+    mask = os.urandom(4)
+    if len(data) < 126:
+        hdr = bytes([0x81, 0x80 | len(data)])
+    elif len(data) < 65536:
+        hdr = bytes([0x81, 0x80 | 126]) + struct.pack(">H", len(data))
+    else:
+        hdr = bytes([0x81, 0x80 | 127]) + struct.pack(">Q", len(data))
+    s.sendall(hdr + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+def recv_all(timeout=10, want=None):
+    out = []
+    s.settimeout(timeout)
+    try:
+        while True:
+            h = s.recv(2)
+            if not h:
+                break
+            b1, b2 = h[0], h[1]
+            ln = b2 & 0x7F
+            if ln == 126:
+                ln = struct.unpack(">H", s.recv(2))[0]
+            elif ln == 127:
+                ln = struct.unpack(">Q", s.recv(8))[0]
+            data = b""
+            while len(data) < ln:
+                chunk = s.recv(ln - len(data))
+                if not chunk:
+                    break
+                data += chunk
+            op = b1 & 0x0F
+            if op == 0x8:
+                break
+            if op == 0x1:
+                m = json.loads(data.decode())
+                out.append(m)
+                if want is not None and any(x.get("id") == want for x in out):
+                    break
+                if len(out) > 80:
+                    break
+    except socket.timeout:
+        pass
+    return out
+
+def result(msgs, mid):
+    for m in msgs:
+        if m.get("id") == mid:
+            if "error" in m:
+                raise RuntimeError(m["error"])
+            return m.get("result", {})
+    raise RuntimeError(f"no result for id {mid}")
+
+send(1, "Target.createTarget", {"url": "about:blank"})
+tid = result(recv_all(want=1), 1)["targetId"]
+send(2, "Target.attachToTarget", {"targetId": tid, "flatten": True})
+sess = result(recv_all(want=2), 2)["sessionId"]
+
+mobile = W < 768
+send(3, "Emulation.setDeviceMetricsOverride",
+     {"width": W, "height": H, "deviceScaleFactor": 1, "mobile": mobile}, sess)
+send(4, "Page.navigate", {"url": url}, sess)
+recv_all(timeout=30)          # drain nav + load events
+time.sleep(3)                 # let late paint / React hydrate settle
+send(5, "Page.captureScreenshot", {"format": "png"}, sess)
+png = None
+for m in recv_all(timeout=20):
+    if m.get("id") == 5 and "result" in m:
+        png = m["result"]["data"]
+        break
+send(6, "Target.closeTarget", {"targetId": tid})
+s.close()
+
+if not png:
+    sys.stderr.write("captureScreenshot returned nothing\n")
+    sys.exit(1)
+with open(out, "wb") as f:
+    f.write(base64.b64decode(png))
+PYEOF
+  [[ -s "$2" ]] || { echo "screenshot failed: $2" >&2; exit 1; }
+}
+
+ensure_engine
+diff_pair() { # $1 = base.png, $2 = head.png, $3 = diff.png, $4 = label
+  python3 - "$1" "$2" "$3" "$4" <<'PYEOF'
+import sys
+from PIL import Image, ImageChops
+bfile, hfile, dfile, label = sys.argv[1:5]
+base = Image.open(bfile).convert('RGB')
+head = Image.open(hfile).convert('RGB')
+if base.size != head.size:
+    print(f"[{label}] SIZE MISMATCH base={base.size[0]}x{base.size[1]} head={head.size[0]}x{head.size[1]} -> {dfile}")
+    base.save(dfile)
+else:
+    diff = ImageChops.difference(base, head)
+    gray = diff.convert('L')
+    TH = 4  # ignore subpixel rendering noise
+    mask = gray.point(lambda v: 255 if v > TH else 0)
+    n = sum(1 for v in mask.getdata() if v)
+    total = base.size[0] * base.size[1]
+    if n == 0:
+        print(f"[{label}] IDENTICAL")
+        base.save(dfile)
+    else:
+        red = Image.new('RGB', base.size, (255, 40, 40))
+        dimmed = base.point(lambda v: int(v * 0.55))
+        Image.composite(red, dimmed, mask).save(dfile)
+        print(f"[{label}] DIFF {100.0*n/total:.2f}% pixels ({n} px) -> {dfile}")
+PYEOF
+}
+
+for vp in "390,844:390px" "1440,900:1440px"; do
+  size="${vp%%:*}"; label="${vp##*:}"
+  W="${size%%,*}"; H="${size##*,}"
+  shot "$P_BASE" "$OUT/base-$label.png" "$W" "$H" "$ROUTE"
+  shot "$P_HEAD" "$OUT/head-$label.png" "$W" "$H" "$ROUTE"
+  diff_pair "$OUT/base-$label.png" "$OUT/head-$label.png" "$OUT/diff-$label.png" "$label"
+done
+
+# drop worktree registrations (files vanish with $TMP cleanup)
+git -C "$REPO" worktree remove --force "$TMP/wt-base" >/dev/null 2>&1 || true
+git -C "$REPO" worktree remove --force "$TMP/wt-head" >/dev/null 2>&1 || true
+exit 0
