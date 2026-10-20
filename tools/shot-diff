@@ -40,7 +40,7 @@ Options:
 
 Examples:
   # prism-window, dev vs a UI tweak branch:
-  tools/shot-diff --repo ~/workspace/micaforge/repos/prism-window \
+  tools/shot-diff --repo ~/workspace/projects/micaforge/repos/prism-window \
       --base dev --head scratch/new-hero --route / \
       --build-cmd "bun run build:client" --build-dir app --dist client/dist
   # prebuilt dirs (no git, no build):
